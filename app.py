@@ -4,7 +4,13 @@ import urllib.request
 import urllib.error
 import json
 import re
+import math
 from datetime import datetime, timezone, timedelta
+
+
+# =========================================================
+# PAGE
+# =========================================================
 
 st.set_page_config(
     page_title="Поиск YouTube-каналов",
@@ -14,11 +20,12 @@ st.set_page_config(
 
 st.title("🔎 Поиск YouTube-каналов")
 st.write(
-    "Ищи перспективные YouTube-каналы по нескольким темам "
-    "и отбирай их с помощью фильтров."
+    "Ищи новые и активно растущие YouTube-каналы "
+    "по нескольким темам и фильтрам."
 )
 
 st.divider()
+
 
 # =========================================================
 # API KEY
@@ -43,11 +50,12 @@ with st.expander("Как получить бесплатный YouTube API-кл�
 6. Ограничьте ключ только для **YouTube Data API v3**.
 7. Вставьте ключ в поле выше.
 
-**Не публикуйте свой API-ключ и не добавляйте его в код.**
+**Не публикуйте API-ключ и не добавляйте его прямо в код.**
 """
     )
 
 st.divider()
+
 
 # =========================================================
 # SEARCH SETTINGS
@@ -59,11 +67,11 @@ topics_text = st.text_area(
     "Темы для поиска — одна тема на строку (максимум 5)",
     height=150,
     placeholder=(
-        "Древний Египет\n"
-        "Римская империя\n"
-        "Викинги\n"
-        "Средневековье\n"
-        "Древняя Греция"
+        "Ancient Egypt\n"
+        "Roman Empire\n"
+        "Vikings\n"
+        "Medieval History\n"
+        "Ancient Greece"
     )
 )
 
@@ -77,9 +85,21 @@ topics = all_topics[:5]
 
 st.caption(f"Добавлено тем: {len(all_topics)} / 5")
 
+
+# =========================================================
+# FILTERS
+# =========================================================
+
 col1, col2 = st.columns(2)
 
 with col1:
+
+    min_subscribers = st.number_input(
+        "Минимум подписчиков",
+        min_value=0,
+        value=0,
+        step=100
+    )
 
     max_subscribers = st.number_input(
         "Максимум подписчиков",
@@ -94,8 +114,8 @@ with col1:
         value=20000,
         step=1000,
         help=(
-            "Канал проходит фильтр, если хотя бы один "
-            "из проверяемых последних роликов набрал "
+            "Канал проходит фильтр, если хотя бы одно "
+            "из проверяемых последних видео набрало "
             "не меньше указанного количества просмотров."
         )
     )
@@ -113,6 +133,34 @@ with col1:
         value=0,
         step=10
     )
+
+    channel_activity = st.selectbox(
+        "Активность канала",
+        [
+            "Неважно",
+            "Минимум 4 видео за последние 30 дней",
+            "Минимум 10 видео за последние 30 дней",
+            "Минимум 15 видео за последние 30 дней",
+            "Минимум 30 видео за последние 60 дней",
+            "Минимум 50 видео за последние 90 дней"
+        ]
+    )
+
+    channel_freshness = st.selectbox(
+        (
+            "Как давно канал начал публиковать видео "
+            "(определяется по самому старому доступному "
+            "видео на канале)"
+        ),
+        [
+            "Неважно",
+            "Не более 30 дней назад",
+            "Не более 90 дней назад",
+            "Не более 6 месяцев назад",
+            "Не более 1 года назад"
+        ]
+    )
+
 
 with col2:
 
@@ -138,7 +186,7 @@ with col2:
     )
 
     upload_recency = st.selectbox(
-        "Когда канал загружал видео",
+        "Когда канал загружал последнее видео",
         [
             "Последние 30 дней",
             "Последние 90 дней",
@@ -148,20 +196,32 @@ with col2:
         index=1
     )
 
-language = st.selectbox(
-    "Язык поиска",
-    [
-        "Любой",
-        "Английский",
-        "Испанский",
-        "Французский",
-        "Немецкий",
-        "Итальянский",
-        "Португальский",
-        "Украинский",
-        "Русский"
-    ]
-)
+    language = st.selectbox(
+        "Язык поиска",
+        [
+            "Любой",
+            "Английский",
+            "Испанский",
+            "Французский",
+            "Немецкий",
+            "Итальянский",
+            "Португальский",
+            "Украинский",
+            "Русский"
+        ]
+    )
+
+    sort_by = st.selectbox(
+        "Сортировать результаты",
+        [
+            "Лучший результат",
+            "Самые новые каналы",
+            "Самые активные",
+            "Меньше всего подписчиков",
+            "Больше всего подписчиков"
+        ]
+    )
+
 
 language_codes = {
     "Английский": "en",
@@ -174,20 +234,45 @@ language_codes = {
     "Русский": "ru"
 }
 
-pages_per_topic = (search_depth + 49) // 50
+
+activity_settings = {
+    "Неважно": None,
+    "Минимум 4 видео за последние 30 дней": (4, 30),
+    "Минимум 10 видео за последние 30 дней": (10, 30),
+    "Минимум 15 видео за последние 30 дней": (15, 30),
+    "Минимум 30 видео за последние 60 дней": (30, 60),
+    "Минимум 50 видео за последние 90 дней": (50, 90)
+}
+
+
+freshness_days = {
+    "Неважно": None,
+    "Не более 30 дней назад": 30,
+    "Не более 90 дней назад": 90,
+    "Не более 6 месяцев назад": 183,
+    "Не более 1 года назад": 365
+}
+
+
+pages_per_topic = math.ceil(search_depth / 50)
 
 if topics:
     estimated_search_calls = len(topics) * pages_per_topic
 
     st.info(
-        f"Примерное количество поисковых запросов к YouTube: "
-        f"до {estimated_search_calls}."
+        f"Поиск YouTube: до {estimated_search_calls} "
+        f"поисковых запросов. "
+        f"Глубина: до {search_depth} результатов "
+        f"для каждой темы.\n\n"
+        "Дополнительные запросы для проверки каналов "
+        "и видео выполняются отдельно."
     )
+
 
 if content_type == "Shorts":
     st.caption(
-        "⚠️ Shorts определяются приблизительно по длительности "
-        "до 3 минут."
+        "⚠️ Shorts определяются приблизительно "
+        "по длительности видео до 3 минут."
     )
 
 st.divider()
@@ -198,6 +283,7 @@ st.divider()
 # =========================================================
 
 def youtube_request(endpoint, params):
+
     request_params = dict(params)
     request_params["key"] = api_key
 
@@ -211,11 +297,12 @@ def youtube_request(endpoint, params):
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "YouTube-Channel-Finder/1.0"
+            "User-Agent": "YouTube-Channel-Finder/2.0"
         }
     )
 
     try:
+
         with urllib.request.urlopen(
             request,
             timeout=30
@@ -228,23 +315,27 @@ def youtube_request(endpoint, params):
     except urllib.error.HTTPError as error:
 
         try:
-            error_body = json.loads(
+
+            body = json.loads(
                 error.read().decode("utf-8")
             )
 
-            message = error_body.get(
-                "error", {}
+            message = body.get(
+                "error",
+                {}
             ).get(
                 "message",
                 f"HTTP ошибка {error.code}"
             )
 
         except Exception:
+
             message = f"HTTP ошибка {error.code}"
 
         raise RuntimeError(message)
 
     except urllib.error.URLError:
+
         raise RuntimeError(
             "Не удалось подключиться к YouTube API."
         )
@@ -253,6 +344,22 @@ def youtube_request(endpoint, params):
 # =========================================================
 # HELPERS
 # =========================================================
+
+def parse_youtube_date(value):
+
+    if not value:
+        return None
+
+    try:
+
+        return datetime.fromisoformat(
+            value.replace("Z", "+00:00")
+        )
+
+    except ValueError:
+
+        return None
+
 
 def duration_to_seconds(duration):
 
@@ -280,45 +387,14 @@ def duration_to_seconds(duration):
     )
 
 
-def get_recency_cutoff():
-
-    days_map = {
-        "Последние 30 дней": 30,
-        "Последние 90 дней": 90,
-        "Последние 365 дней": 365
-    }
-
-    if upload_recency == "Неважно":
-        return None
-
-    days = days_map[upload_recency]
-
-    return (
-        datetime.now(timezone.utc)
-        - timedelta(days=days)
-    )
-
-
-def parse_youtube_date(value):
-
-    if not value:
-        return None
-
-    try:
-        return datetime.fromisoformat(
-            value.replace("Z", "+00:00")
-        )
-    except ValueError:
-        return None
-
-
 def video_matches_content_type(video):
 
     if content_type == "Все видео":
         return True
 
     duration = video.get(
-        "contentDetails", {}
+        "contentDetails",
+        {}
     ).get(
         "duration",
         "PT0S"
@@ -335,8 +411,27 @@ def video_matches_content_type(video):
     return True
 
 
+def get_last_upload_cutoff():
+
+    days_map = {
+        "Последние 30 дней": 30,
+        "Последние 90 дней": 90,
+        "Последние 365 дней": 365
+    }
+
+    if upload_recency == "Неважно":
+        return None
+
+    return (
+        datetime.now(timezone.utc)
+        - timedelta(
+            days=days_map[upload_recency]
+        )
+    )
+
+
 # =========================================================
-# CHANNEL SEARCH
+# SEARCH CHANNELS
 # =========================================================
 
 def search_channels(topic):
@@ -358,11 +453,13 @@ def search_channels(topic):
         }
 
         if language != "Любой":
+
             params["relevanceLanguage"] = (
                 language_codes[language]
             )
 
         if page_token:
+
             params["pageToken"] = page_token
 
         data = youtube_request(
@@ -370,12 +467,16 @@ def search_channels(topic):
             params
         )
 
-        items = data.get("items", [])
+        items = data.get(
+            "items",
+            []
+        )
 
         for item in items:
 
             channel_id = item.get(
-                "id", {}
+                "id",
+                {}
             ).get(
                 "channelId"
             )
@@ -427,18 +528,22 @@ def get_channel_details(channel_ids):
         )
 
         channels.extend(
-            data.get("items", [])
+            data.get(
+                "items",
+                []
+            )
         )
 
     return channels
 
 
 # =========================================================
-# RECENT UPLOADS
+# UPLOADS PLAYLIST
 # =========================================================
 
-def get_recent_video_ids(
-    uploads_playlist_id
+def get_recent_uploads(
+    uploads_playlist_id,
+    amount
 ):
 
     data = youtube_request(
@@ -448,11 +553,11 @@ def get_recent_video_ids(
             "playlistId":
                 uploads_playlist_id,
             "maxResults":
-                min(recent_videos, 50)
+                min(amount, 50)
         }
     )
 
-    videos = []
+    uploads = []
 
     for item in data.get(
         "items",
@@ -474,41 +579,186 @@ def get_recent_video_ids(
 
         if video_id:
 
-            videos.append(
+            uploads.append(
                 {
-                    "video_id":
-                        video_id,
-                    "published_at":
-                        published_at
+                    "video_id": video_id,
+                    "published_at": published_at
                 }
             )
 
-    return videos
+    return uploads
 
+
+def get_all_upload_dates(
+    uploads_playlist_id,
+    max_needed=100
+):
+
+    dates = []
+
+    page_token = None
+
+    while len(dates) < max_needed:
+
+        params = {
+            "part": "contentDetails",
+            "playlistId":
+                uploads_playlist_id,
+            "maxResults": 50
+        }
+
+        if page_token:
+            params["pageToken"] = page_token
+
+        data = youtube_request(
+            "playlistItems",
+            params
+        )
+
+        items = data.get(
+            "items",
+            []
+        )
+
+        for item in items:
+
+            published_at = item.get(
+                "contentDetails",
+                {}
+            ).get(
+                "videoPublishedAt"
+            )
+
+            date = parse_youtube_date(
+                published_at
+            )
+
+            if date:
+                dates.append(date)
+
+        page_token = data.get(
+            "nextPageToken"
+        )
+
+        if not page_token or not items:
+            break
+
+    return dates
+
+
+def get_oldest_upload_date(
+    uploads_playlist_id,
+    video_count
+):
+
+    if video_count <= 0:
+        return None
+
+    last_page = max(
+        1,
+        math.ceil(video_count / 50)
+    )
+
+    page_token = None
+    data = None
+
+    for _ in range(last_page):
+
+        params = {
+            "part": "contentDetails",
+            "playlistId":
+                uploads_playlist_id,
+            "maxResults": 50
+        }
+
+        if page_token:
+            params["pageToken"] = page_token
+
+        data = youtube_request(
+            "playlistItems",
+            params
+        )
+
+        page_token = data.get(
+            "nextPageToken"
+        )
+
+        if not page_token:
+            break
+
+    if not data:
+        return None
+
+    dates = []
+
+    for item in data.get(
+        "items",
+        []
+    ):
+
+        published_at = item.get(
+            "contentDetails",
+            {}
+        ).get(
+            "videoPublishedAt"
+        )
+
+        date = parse_youtube_date(
+            published_at
+        )
+
+        if date:
+            dates.append(date)
+
+    if not dates:
+        return None
+
+    return min(dates)
+
+
+# =========================================================
+# VIDEO DETAILS
+# =========================================================
 
 def get_video_details(video_ids):
 
     if not video_ids:
         return []
 
-    data = youtube_request(
-        "videos",
-        {
-            "part":
-                "statistics,contentDetails,snippet",
-            "id":
-                ",".join(video_ids)
-        }
-    )
+    videos = []
 
-    return data.get(
-        "items",
-        []
-    )
+    for start in range(
+        0,
+        len(video_ids),
+        50
+    ):
+
+        batch = video_ids[
+            start:start + 50
+        ]
+
+        data = youtube_request(
+            "videos",
+            {
+                "part":
+                    "statistics,contentDetails,snippet",
+                "id":
+                    ",".join(batch)
+            }
+        )
+
+        videos.extend(
+            data.get(
+                "items",
+                []
+            )
+        )
+
+    return videos
 
 
 # =========================================================
-# RUN SEARCH
+# RUN
 # =========================================================
 
 if st.button(
@@ -535,6 +785,26 @@ if st.button(
             "Можно добавить максимум 5 тем."
         )
 
+    elif (
+        max_subscribers > 0
+        and min_subscribers > max_subscribers
+    ):
+
+        st.error(
+            "Минимум подписчиков не может быть "
+            "больше максимума."
+        )
+
+    elif (
+        max_videos > 0
+        and min_videos > max_videos
+    ):
+
+        st.error(
+            "Минимум видео не может быть "
+            "больше максимума."
+        )
+
     else:
 
         try:
@@ -542,12 +812,11 @@ if st.button(
             found_channels = {}
 
             progress = st.progress(0)
-
             status = st.empty()
 
-            # -----------------------------------------
-            # SEARCH CHANNELS
-            # -----------------------------------------
+            # =================================================
+            # SEARCH
+            # =================================================
 
             for index, topic in enumerate(
                 topics
@@ -574,8 +843,7 @@ if st.button(
 
                     if (
                         topic
-                        not in
-                        found_channels[
+                        not in found_channels[
                             channel_id
                         ]["topics"]
                     ):
@@ -592,7 +860,7 @@ if st.button(
                             (index + 1)
                             / len(topics)
                         )
-                        * 25
+                        * 20
                     )
                 )
 
@@ -612,9 +880,9 @@ if st.button(
 
                 st.stop()
 
-            # -----------------------------------------
-            # CHANNEL STATISTICS
-            # -----------------------------------------
+            # =================================================
+            # CHANNEL STATS
+            # =================================================
 
             status.write(
                 f"Найдено уникальных каналов: "
@@ -659,22 +927,21 @@ if st.button(
                     )
                 )
 
-                if (
-                    subscribers
-                    > max_subscribers
-                ):
+                if subscribers < min_subscribers:
                     continue
 
                 if (
-                    video_count
-                    < min_videos
+                    max_subscribers > 0
+                    and subscribers > max_subscribers
                 ):
+                    continue
+
+                if video_count < min_videos:
                     continue
 
                 if (
                     max_videos > 0
-                    and video_count
-                    > max_videos
+                    and video_count > max_videos
                 ):
                     continue
 
@@ -682,9 +949,9 @@ if st.button(
                     channel
                 )
 
-            # -----------------------------------------
-            # INSPECT VIDEOS
-            # -----------------------------------------
+            # =================================================
+            # ANALYSIS
+            # =================================================
 
             results = []
 
@@ -693,7 +960,25 @@ if st.button(
                 1
             )
 
-            cutoff = get_recency_cutoff()
+            last_upload_cutoff = (
+                get_last_upload_cutoff()
+            )
+
+            activity_rule = (
+                activity_settings[
+                    channel_activity
+                ]
+            )
+
+            freshness_limit = (
+                freshness_days[
+                    channel_freshness
+                ]
+            )
+
+            now = datetime.now(
+                timezone.utc
+            )
 
             for index, channel in enumerate(
                 candidate_channels
@@ -740,29 +1025,149 @@ if st.button(
                 if not uploads_playlist_id:
                     continue
 
+                subscribers = int(
+                    statistics.get(
+                        "subscriberCount",
+                        0
+                    )
+                )
+
+                video_count = int(
+                    statistics.get(
+                        "videoCount",
+                        0
+                    )
+                )
+
+                # ---------------------------------------------
+                # Recent videos for view analysis
+                # ---------------------------------------------
+
                 recent_uploads = (
-                    get_recent_video_ids(
-                        uploads_playlist_id
+                    get_recent_uploads(
+                        uploads_playlist_id,
+                        recent_videos
                     )
                 )
 
                 if not recent_uploads:
                     continue
 
-                latest_date = parse_youtube_date(
-                    recent_uploads[0].get(
-                        "published_at"
+                latest_date = (
+                    parse_youtube_date(
+                        recent_uploads[0].get(
+                            "published_at"
+                        )
                     )
                 )
 
                 if (
-                    cutoff
+                    last_upload_cutoff
                     and (
                         not latest_date
-                        or latest_date < cutoff
+                        or latest_date
+                        < last_upload_cutoff
                     )
                 ):
                     continue
+
+                # ---------------------------------------------
+                # Activity
+                # ---------------------------------------------
+
+                activity_count_30 = 0
+
+                dates_for_activity = []
+
+                if activity_rule:
+
+                    required_count, activity_days = (
+                        activity_rule
+                    )
+
+                    amount_needed = min(
+                        max(
+                            required_count + 10,
+                            50
+                        ),
+                        100
+                    )
+
+                    dates_for_activity = (
+                        get_all_upload_dates(
+                            uploads_playlist_id,
+                            amount_needed
+                        )
+                    )
+
+                    activity_cutoff = (
+                        now
+                        - timedelta(
+                            days=activity_days
+                        )
+                    )
+
+                    activity_count = sum(
+                        1
+                        for date in dates_for_activity
+                        if date >= activity_cutoff
+                    )
+
+                    if (
+                        activity_count
+                        < required_count
+                    ):
+                        continue
+
+                else:
+
+                    dates_for_activity = (
+                        get_all_upload_dates(
+                            uploads_playlist_id,
+                            50
+                        )
+                    )
+
+                cutoff_30 = (
+                    now
+                    - timedelta(days=30)
+                )
+
+                activity_count_30 = sum(
+                    1
+                    for date in dates_for_activity
+                    if date >= cutoff_30
+                )
+
+                # ---------------------------------------------
+                # First available video
+                # ---------------------------------------------
+
+                oldest_date = (
+                    get_oldest_upload_date(
+                        uploads_playlist_id,
+                        video_count
+                    )
+                )
+
+                if freshness_limit is not None:
+
+                    if not oldest_date:
+                        continue
+
+                    freshness_cutoff = (
+                        now
+                        - timedelta(
+                            days=freshness_limit
+                        )
+                    )
+
+                    if oldest_date < freshness_cutoff:
+                        continue
+
+                # ---------------------------------------------
+                # Video statistics
+                # ---------------------------------------------
 
                 video_ids = [
                     item["video_id"]
@@ -809,29 +1214,12 @@ if st.button(
                     view_counts
                 )
 
-                if (
-                    highest_views
-                    < min_views
-                ):
+                if highest_views < min_views:
                     continue
 
                 average_views = int(
                     sum(view_counts)
                     / len(view_counts)
-                )
-
-                subscribers = int(
-                    statistics.get(
-                        "subscriberCount",
-                        0
-                    )
-                )
-
-                video_count = int(
-                    statistics.get(
-                        "videoCount",
-                        0
-                    )
                 )
 
                 total_channel_views = int(
@@ -841,11 +1229,11 @@ if st.button(
                     )
                 )
 
-                views_subscribers_ratio = (
+                ratio = (
                     round(
-                        average_views
+                        highest_views
                         / subscribers,
-                        2
+                        1
                     )
                     if subscribers > 0
                     else 0
@@ -859,6 +1247,12 @@ if st.button(
                         "topics",
                         []
                     )
+                )
+
+                channel_age_days = (
+                    (now - oldest_date).days
+                    if oldest_date
+                    else None
                 )
 
                 results.append(
@@ -878,22 +1272,28 @@ if st.button(
                         "Видео на канале":
                             video_count,
 
-                        "Всего просмотров":
-                            total_channel_views,
-
                         "Лучший результат":
                             highest_views,
 
                         "Средние просмотры":
                             average_views,
 
-                        "Просмотры / подписчики":
-                            views_subscribers_ratio,
+                        "Лучшее видео / подписчики":
+                            ratio,
 
-                        "Проверено видео":
-                            len(videos),
+                        "Видео за 30 дней":
+                            activity_count_30,
 
-                        "Последняя загрузка":
+                        "Первое доступное видео":
+                            (
+                                oldest_date.strftime(
+                                    "%d.%m.%Y"
+                                )
+                                if oldest_date
+                                else "—"
+                            ),
+
+                        "Последнее видео":
                             (
                                 latest_date.strftime(
                                     "%d.%m.%Y"
@@ -901,6 +1301,20 @@ if st.button(
                                 if latest_date
                                 else "—"
                             ),
+
+                        "Возраст контента (дни)":
+                            (
+                                channel_age_days
+                                if channel_age_days
+                                is not None
+                                else 999999
+                            ),
+
+                        "Всего просмотров":
+                            total_channel_views,
+
+                        "Проверено видео":
+                            len(videos),
 
                         "Найден по темам":
                             ", ".join(
@@ -912,13 +1326,13 @@ if st.button(
                 progress.progress(
                     min(
                         100,
-                        25
+                        20
                         + int(
                             (
                                 (index + 1)
                                 / total_candidates
                             )
-                            * 75
+                            * 80
                         )
                     )
                 )
@@ -926,9 +1340,53 @@ if st.button(
             progress.progress(100)
             status.empty()
 
-            # -----------------------------------------
+            # =================================================
+            # SORTING
+            # =================================================
+
+            if sort_by == "Лучший результат":
+
+                results.sort(
+                    key=lambda row:
+                        row["Лучший результат"],
+                    reverse=True
+                )
+
+            elif sort_by == "Самые новые каналы":
+
+                results.sort(
+                    key=lambda row:
+                        row[
+                            "Возраст контента (дни)"
+                        ]
+                )
+
+            elif sort_by == "Самые активные":
+
+                results.sort(
+                    key=lambda row:
+                        row["Видео за 30 дней"],
+                    reverse=True
+                )
+
+            elif sort_by == "Меньше всего подписчиков":
+
+                results.sort(
+                    key=lambda row:
+                        row["Подписчики"]
+                )
+
+            elif sort_by == "Больше всего подписчиков":
+
+                results.sort(
+                    key=lambda row:
+                        row["Подписчики"],
+                    reverse=True
+                )
+
+            # =================================================
             # RESULTS
-            # -----------------------------------------
+            # =================================================
 
             st.subheader(
                 "📊 Результаты"
@@ -936,22 +1394,28 @@ if st.button(
 
             if results:
 
-                results = sorted(
-                    results,
-                    key=lambda row:
-                        row[
-                            "Лучший результат"
-                        ],
-                    reverse=True
-                )
-
                 st.success(
                     f"Подходящих каналов: "
                     f"{len(results)}"
                 )
 
+                display_results = []
+
+                for row in results:
+
+                    display_row = dict(row)
+
+                    display_row.pop(
+                        "Возраст контента (дни)",
+                        None
+                    )
+
+                    display_results.append(
+                        display_row
+                    )
+
                 st.dataframe(
-                    results,
+                    display_results,
                     use_container_width=True,
                     hide_index=True,
                     column_config={
@@ -962,27 +1426,15 @@ if st.button(
                     }
                 )
 
-                csv_columns = [
-                    "Канал",
-                    "Ссылка",
-                    "Подписчики",
-                    "Видео на канале",
-                    "Всего просмотров",
-                    "Лучший результат",
-                    "Средние просмотры",
-                    "Просмотры / подписчики",
-                    "Проверено видео",
-                    "Последняя загрузка",
-                    "Найден по темам"
-                ]
+                csv_columns = list(
+                    display_results[0].keys()
+                )
 
                 csv_lines = [
-                    ",".join(
-                        csv_columns
-                    )
+                    ",".join(csv_columns)
                 ]
 
-                for row in results:
+                for row in display_results:
 
                     values = []
 
@@ -1001,18 +1453,14 @@ if st.button(
                             + '"'
                         )
 
-                        values.append(
-                            value
-                        )
+                        values.append(value)
 
                     csv_lines.append(
                         ",".join(values)
                     )
 
                 csv_data = (
-                    "\n".join(
-                        csv_lines
-                    )
+                    "\n".join(csv_lines)
                 ).encode(
                     "utf-8-sig"
                 )
@@ -1020,9 +1468,7 @@ if st.button(
                 st.download_button(
                     "⬇️ Скачать результаты CSV",
                     data=csv_data,
-                    file_name=(
-                        "youtube_channels.csv"
-                    ),
+                    file_name="youtube_channels.csv",
                     mime="text/csv"
                 )
 
@@ -1031,10 +1477,8 @@ if st.button(
                 st.warning(
                     "По заданным фильтрам "
                     "подходящих каналов не найдено. "
-                    "Попробуйте уменьшить минимум "
-                    "просмотров, увеличить максимум "
-                    "подписчиков или расширить "
-                    "период активности."
+                    "Попробуйте немного ослабить "
+                    "один или несколько фильтров."
                 )
 
             if hidden_subscribers > 0:
